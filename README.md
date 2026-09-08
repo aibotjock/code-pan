@@ -146,11 +146,13 @@ knowledge is permanent.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v   # 64 tests, hermetic (temp DBs)
+scripts/test.sh    # 80 tests, hermetic (temp DBs); pipefail-safe green check
 ```
 
 `tests/test_protocol.py` drives the real server process over stdio JSON-RPC —
-handshake, tool calls, secret refusal, malformed input, clean shutdown.
+handshake, tool calls, secret refusal, hostile inputs (malformed initialize,
+invalid UTF-8, oversized messages), clean shutdown. `tests/test_engine.py`
+includes a two-process concurrent-writer suite.
 
 ## Robustness & limits
 
