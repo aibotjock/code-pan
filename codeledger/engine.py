@@ -172,6 +172,10 @@ def record_success(ctx: dict, args: dict) -> str:
             title = clean.get("title") or _default_title(clean_code)
             env = args.get("env") if isinstance(args.get("env"), dict) else None
             entry_id = store.insert(
+                event={"action": "created", "actor": ctx["actor"], "reason": "success recorded",
+                       "evidence": evidence,
+                       "new_state": "proven" if objective else "probation",
+                       "new_confidence": 0.65 if objective else 0.30},
                 state="proven" if objective else "probation",
                 scope="project", project=ctx["project"],
                 title=title, code=clean_code, language=language,
@@ -184,9 +188,6 @@ def record_success(ctx: dict, args: dict) -> str:
                 limitations=clean.get("limitations"), provenance=clean.get("provenance"),
                 last_verified_at=now_iso() if objective else None,
             )
-            store.add_event(entry_id, "created", ctx["actor"], reason="success recorded",
-                            evidence=evidence, new_state="proven" if objective else "probation",
-                            new_confidence=0.65 if objective else 0.30)
             return (f"created #{entry_id} [{'PROVEN' if objective else 'PROBATION'}·{ctx['project']}] "
                     f"confidence {'0.65' if objective else '0.30'}"
                     + ("" if objective else " — opinion only; objective evidence (test/build/runtime/human) will promote it"))
@@ -254,6 +255,10 @@ def record_failure(ctx: dict, args: dict) -> str:
                     else 0.70 if quarantined else 0.30)
             env = args.get("env") if isinstance(args.get("env"), dict) else None
             entry_id = store.insert(
+                event={"action": "created", "actor": ctx["actor"], "reason": clean_reason,
+                       "evidence": evidence,
+                       "new_state": "quarantined" if quarantined else "probation",
+                       "new_confidence": conf},
                 state="quarantined" if quarantined else "probation",
                 scope="project", project=ctx["project"],
                 title=clean.get("title") or _default_title(clean_code),
@@ -266,10 +271,6 @@ def record_failure(ctx: dict, args: dict) -> str:
                 evidence=json.dumps(evidence),
                 confidence=conf, success_count=0, failure_count=1,
             )
-            store.add_event(entry_id, "created", ctx["actor"], reason=clean_reason,
-                            evidence=evidence,
-                            new_state="quarantined" if quarantined else "probation",
-                            new_confidence=conf)
             note = (f"created #{entry_id} [QUARANTINED·{ctx['project']}] confidence {conf:.2f}"
                     if quarantined else
                     f"created #{entry_id} [PROBATION·{ctx['project']}] confidence 0.30 "

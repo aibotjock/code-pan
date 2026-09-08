@@ -7,9 +7,11 @@ audit trail). Historical evidence is never rewritten.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -279,8 +281,19 @@ class Store:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=10000")
+        # Switching journal mode needs a lock another fresh process may hold
+        # (SQLITE_BUSY here ignores the busy handler) — only switch when
+        # needed and retry briefly; WAL is persistent once set.
+        for _attempt in range(20):
+            try:
+                mode = self.conn.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(mode).lower() == "wal":
+                    break
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError:
+                time.sleep(0.05)
         self.conn.executescript(_SCHEMA)
         self.fts = False
         if use_fts:
@@ -307,7 +320,9 @@ class Store:
 
     # -- entries ------------------------------------------------------------
 
-    def insert(self, **fields) -> int:
+    def insert(self, event: dict | None = None, **fields) -> int:
+        """Insert an entry; when `event` kwargs are given, its first audit event
+        is written in the same transaction (a kill between them is impossible)."""
         cols = [c for c in fields if c in _ENTRY_COLS]
         now = now_iso()
         values = {c: fields[c] for c in cols}
@@ -325,7 +340,10 @@ class Store:
                 f"INSERT INTO entries ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                 [values[k] for k in keys],
             )
-            return int(cur.lastrowid)
+            entry_id = int(cur.lastrowid)
+            if event:
+                self._write_event(entry_id, **event)
+            return entry_id
 
     def update(self, entry_id: int, **fields) -> None:
         cols = {k: v for k, v in fields.items() if k in _ENTRY_COLS}
@@ -385,7 +403,7 @@ class Store:
 
     # -- events -------------------------------------------------------------
 
-    def add_event(
+    def _write_event(
         self,
         entry_id: int | None,
         action: str,
@@ -398,19 +416,23 @@ class Store:
         new_confidence: float | None = None,
         detail: dict | None = None,
     ) -> None:
-        import json as _json
+        self.conn.execute(
+            "INSERT INTO events (ts, entry_id, action, actor, reason, evidence, "
+            "prev_state, new_state, prev_confidence, new_confidence, detail) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                now_iso(), entry_id, action, actor, reason,
+                json.dumps(evidence) if evidence else None,
+                prev_state, new_state, prev_confidence, new_confidence,
+                json.dumps(detail) if detail else None,
+            ),
+        )
+
+    def add_event(self, entry_id: int | None, action: str, actor: str | None = None,
+                  **kw) -> None:
+        """Append one audit event in its own transaction."""
         with self._tx():
-            self.conn.execute(
-                "INSERT INTO events (ts, entry_id, action, actor, reason, evidence, "
-                "prev_state, new_state, prev_confidence, new_confidence, detail) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    now_iso(), entry_id, action, actor, reason,
-                    _json.dumps(evidence) if evidence else None,
-                    prev_state, new_state, prev_confidence, new_confidence,
-                    _json.dumps(detail) if detail else None,
-                ),
-            )
+            self._write_event(entry_id, action, actor=actor, **kw)
 
     def events(self, entry_id: int, limit: int = 50) -> list[dict]:
         rows = self.conn.execute(

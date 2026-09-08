@@ -152,6 +152,22 @@ python3 -m unittest discover -s tests -v   # 64 tests, hermetic (temp DBs)
 `tests/test_protocol.py` drives the real server process over stdio JSON-RPC —
 handshake, tool calls, secret refusal, malformed input, clean shutdown.
 
+## Robustness & limits
+
+The stdio transport is hardened against hostile input: a bad message gets a
+proper JSON-RPC error (`-32700`/`-32600`/`-32602`/`-32601`/`-32603`) and the
+server keeps serving. Invalid UTF-8 bytes are replaced, not fatal. Messages
+over 10 MiB are rejected with an explicit error — the session survives (the
+official SDK default tears the session down silently at that size). Internal
+errors never leak Python internals. Entry creation and its first audit event
+are written in a single transaction.
+
+Known limit: concurrent writers from multiple processes are safely serialized
+by SQLite (no lost inserts), but read-modify-write sequences inside one tool
+call (counters, confidence) can interleave under heavy multi-process load.
+MCP launches one server process per client, so this only matters if you run
+several `codepan` processes against one DB simultaneously.
+
 ## v1 non-goals
 
 No embeddings, no vector DB, no ML scoring, no autonomous agents. The matching

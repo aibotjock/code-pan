@@ -133,6 +133,17 @@ class TestStore(unittest.TestCase):
         finally:
             fallback.conn.close()
 
+    def test_insert_with_event_is_one_transaction(self):
+        eid = self.store.insert(
+            event={"action": "created", "actor": "t", "new_state": "probation",
+                   "new_confidence": 0.3},
+            title="t", code="c", norm_hash="h1")
+        self.assertIsNotNone(self.store.get(eid))
+        evs = self.store.events(eid)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]["action"], "created")
+        self.assertEqual(evs[0]["new_confidence"], 0.3)
+
     def test_stats(self):
         self.store.insert(title="t", code="c", norm_hash="h")
         st = self.store.stats()

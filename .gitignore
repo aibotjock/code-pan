@@ -1,6 +1,9 @@
-__pycache__/
-*.pyc
+
 *.db
-*.db-wal
 *.db-shm
+*.db-wal
+.gauntlet/
+PROGRESS.html
+*.pyc
+__pycache__/
 .venv/

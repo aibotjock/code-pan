@@ -13,7 +13,11 @@ import traceback
 from . import __version__, engine
 from .ledger import Store, default_project, now_iso
 
-SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
+
+# Matches the official SDK's default stdio buffer cap; unlike the SDK we answer
+# with an explicit error and keep serving instead of tearing down the session.
+MAX_MESSAGE_CHARS = 10 * 1024 * 1024
 
 _EVIDENCE = {
     "type": "array",
@@ -44,6 +48,7 @@ _TOOL_SPECS = [
                 "env": {"type": "object"},
             },
         },
+        {"readOnlyHint": True},
     ),
     (
         "check_code",
@@ -59,6 +64,7 @@ _TOOL_SPECS = [
             },
             "required": ["code"],
         },
+        {"readOnlyHint": True},
     ),
     (
         "search",
@@ -77,6 +83,7 @@ _TOOL_SPECS = [
                 "include_archived": {"type": "boolean"},
             },
         },
+        {"readOnlyHint": True},
     ),
     (
         "record_success",
@@ -203,7 +210,7 @@ _TOOL_SPECS = [
             "type": "object",
             "properties": {
                 "entry_id": {"type": "integer"},
-                "delta": {"type": "number"},
+                "delta": {"type": "number", "minimum": -0.5, "maximum": 0.5},
                 "value": {"type": "number", "minimum": 0, "maximum": 1},
                 "reason": {"type": "string"},
             },
@@ -220,6 +227,7 @@ _TOOL_SPECS = [
             "properties": {"entry_id": {"type": "integer"}},
             "required": ["entry_id"],
         },
+        {"readOnlyHint": True},
     ),
     (
         "maintain",
@@ -236,10 +244,12 @@ _TOOL_SPECS = [
     ),
 ]
 
-TOOLS = [
-    {"name": name, "description": desc, "inputSchema": schema}
-    for name, desc, schema in _TOOL_SPECS
-]
+TOOLS = []
+for _name, _desc, _schema, *_extra in _TOOL_SPECS:
+    _tool = {"name": _name, "description": _desc, "inputSchema": _schema}
+    if _extra and _extra[0]:
+        _tool["annotations"] = _extra[0]
+    TOOLS.append(_tool)
 
 _DISPATCH = {
     "get_experience": engine.get_experience,
@@ -305,55 +315,76 @@ def serve(db_path: str | None = None) -> None:
     default_project = os.environ.get("CODELEDGER_PROJECT") or _default_project()
     default_actor = os.environ.get("CODELEDGER_ACTOR")
     client = "unknown-client"
+    try:  # hostile bytes on stdin must never kill the transport
+        sys.stdin.reconfigure(errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
     _log(f"codeledger {__version__} serving db={db_path} project={default_project}")
     try:
         for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
+            msg_id = None
             try:
-                msg = json.loads(line)
-            except ValueError:
-                _send({"jsonrpc": "2.0", "id": None,
-                       "error": {"code": -32700, "message": "Parse error"}})
-                continue
-            if not isinstance(msg, dict):
-                _send({"jsonrpc": "2.0", "id": None,
-                       "error": {"code": -32600, "message": "Invalid Request"}})
-                continue
-            method = msg.get("method")
-            msg_id = msg.get("id")
-            if method == "initialize":
-                params = msg.get("params") or {}
-                client = (params.get("clientInfo") or {}).get("name", client)
-                version = params.get("protocolVersion")
-                if version not in SUPPORTED_PROTOCOL_VERSIONS:
-                    version = "2025-06-18"
-                _send({
-                    "jsonrpc": "2.0", "id": msg_id, "result": {
-                        "protocolVersion": version,
-                        "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "codeledger", "version": __version__},
-                    }
-                })
-                continue
-            if "id" not in msg:
-                continue  # notification (notifications/initialized, cancelled, …)
-            try:
+                line = line.strip()
+                if not line:
+                    continue
+                if len(line) > MAX_MESSAGE_CHARS:
+                    _send({"jsonrpc": "2.0", "id": None,
+                           "error": {"code": -32600,
+                                     "message": f"Message too large: {len(line)} chars exceeds "
+                                                f"{MAX_MESSAGE_CHARS}. Drop it and resend smaller."}})
+                    _log(f"rejected oversized message ({len(line)} chars)")
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    _send({"jsonrpc": "2.0", "id": None,
+                           "error": {"code": -32700, "message": "Parse error"}})
+                    continue
+                if not isinstance(msg, dict):
+                    _send({"jsonrpc": "2.0", "id": None,
+                           "error": {"code": -32600, "message": "Invalid Request"}})
+                    continue
+                method = msg.get("method")
+                msg_id = msg.get("id")
+                params = msg.get("params")
+                if params is not None and not isinstance(params, dict):
+                    if "id" in msg:  # requests get a proper error; notifications are dropped
+                        _send({"jsonrpc": "2.0", "id": msg_id,
+                               "error": {"code": -32602,
+                                         "message": "Invalid params: expected an object"}})
+                    continue
+                params = params or {}
+                if method == "initialize":
+                    info = params.get("clientInfo")
+                    if isinstance(info, dict) and isinstance(info.get("name"), str):
+                        client = info["name"] or client
+                    version = params.get("protocolVersion")
+                    if not isinstance(version, str) or version not in SUPPORTED_PROTOCOL_VERSIONS:
+                        version = "2025-06-18"
+                    _send({
+                        "jsonrpc": "2.0", "id": msg_id, "result": {
+                            "protocolVersion": version,
+                            "capabilities": {"tools": {"listChanged": False}},
+                            "serverInfo": {"name": "codeledger", "version": __version__},
+                        }
+                    })
+                    continue
+                if "id" not in msg:
+                    continue  # notification (notifications/initialized, cancelled, …)
                 if method == "ping":
                     _send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
                 elif method == "tools/list":
                     _send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}})
                 elif method == "tools/call":
                     _send({"jsonrpc": "2.0", "id": msg_id, "result": _call_tool(
-                        store, default_project, default_actor, client, msg.get("params") or {})})
+                        store, default_project, default_actor, client, params)})
                 else:
                     _send({"jsonrpc": "2.0", "id": msg_id,
                            "error": {"code": -32601, "message": f"Method not found: {method}"}})
-            except Exception as exc:  # transport must never die on a handler bug
-                _log(f"error handling {method}: {exc}\n{traceback.format_exc()}")
+            except Exception:  # the transport must never die on one bad message
+                _log(f"error handling message: {traceback.format_exc()}")
                 _send({"jsonrpc": "2.0", "id": msg_id,
-                       "error": {"code": -32603, "message": f"Internal error: {exc}"}})
+                       "error": {"code": -32603, "message": "Internal error"}})
     except KeyboardInterrupt:
         pass
     finally:

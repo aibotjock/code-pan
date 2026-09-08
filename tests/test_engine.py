@@ -320,5 +320,46 @@ class TestMaintain(EngineBase):
         self.assertIn("db", out)
 
 
+class TestConcurrency(unittest.TestCase):
+    """Two real writer processes on one DB: no lost writes, no crashes (critic scenario)."""
+
+    def test_two_processes_no_lost_writes(self):
+        import subprocess
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db = os.path.join(tmp.name, "c.db")
+            writer = os.path.join(tmp.name, "w.py")
+            with open(writer, "w") as fh:
+                fh.write(
+                    "import sys\n"
+                    f"sys.path.insert(0, {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))!r})\n"
+                    "from codeledger.ledger import Store\n"
+                    "from codeledger import engine\n"
+                    f"db = {db!r}\n"
+                    "s = Store(db)\n"
+                    "ctx = {'store': s, 'actor': 'writer', 'project': 'p', 'db_path': db}\n"
+                    "tag = sys.argv[1]\n"
+                    "for i in range(25):\n"
+                    "    engine.record_success(ctx, {'code': f'def {tag}_{i}(): return {i}',\n"
+                    "                                'evidence': [{'type': 'test'}]})\n"
+                )
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            procs = [subprocess.Popen([sys.executable, writer, tag], env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                     for tag in ("a", "b")]
+            for p in procs:
+                _, err = p.communicate(timeout=120)
+                self.assertEqual(p.returncode, 0, err.decode()[:400])
+            store = Store(db)
+            try:
+                st = store.stats()
+                self.assertEqual(st["total"], 50)
+                self.assertGreaterEqual(st["events"], 50)
+            finally:
+                store.conn.close()
+        finally:
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

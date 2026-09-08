@@ -1,10 +1,11 @@
 """End-to-end: drive the real server process over stdio JSON-RPC."""
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +25,16 @@ class ServerProc:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, env=env,
         )
+        # A reader thread feeding a queue: select() on the fd would race with
+        # the buffered text wrapper (responses queued in userspace -> false
+        # timeout -> every later recv shifts by one).
+        self._lines = queue.Queue()
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        for line in self.proc.stdout:
+            self._lines.put(line)
+        self._lines.put(None)  # EOF sentinel
 
     def send(self, obj):
         self.proc.stdin.write(json.dumps(obj) + "\n")
@@ -33,11 +44,15 @@ class ServerProc:
         self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
 
+    def raw_bytes(self, data: bytes):
+        self.proc.stdin.buffer.write(data)
+        self.proc.stdin.buffer.flush()
+
     def recv(self, timeout=15):
-        r, _, _ = select.select([self.proc.stdout], [], [], timeout)
-        if not r:
-            raise TimeoutError("no response from server")
-        return json.loads(self.proc.stdout.readline())
+        line = self._lines.get(timeout=timeout)  # TimeoutError if silent
+        if line is None:
+            raise TimeoutError("server closed stdout")
+        return json.loads(line)
 
     def call(self, msg_id, name, arguments):
         self.send({"jsonrpc": "2.0", "id": msg_id, "method": "tools/call",
@@ -162,6 +177,83 @@ class TestProtocolE2E(unittest.TestCase):
         for line in stderr.strip().splitlines():
             json.loads(line)  # stderr lines are structured logs
         self.assertEqual(code, 0)
+
+
+class TestHostileInputs(unittest.TestCase):
+    """One hostile line must never kill the transport (round-1 critic findings)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.srv = ServerProc(os.path.join(cls.tmp.name, "l.db"))
+        cls.srv.send({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                      "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "hostile", "version": "1"}}})
+        cls.srv.recv()
+        cls.srv.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.close()
+        cls.srv.proc.stderr.read()  # drain so pipes close cleanly
+        cls.tmp.cleanup()
+
+    def test_initialize_with_string_params_gets_32602_and_survives(self):
+        self.srv.send({"jsonrpc": "2.0", "id": 30, "method": "initialize", "params": "x"})
+        r = self.srv.recv()
+        self.assertEqual(r["error"]["code"], -32602)
+        self.srv.send({"jsonrpc": "2.0", "id": 31, "method": "ping"})
+        self.assertEqual(self.srv.recv()["result"], {})
+
+    def test_initialize_with_list_params_and_junk_clientinfo_survives(self):
+        self.srv.send({"jsonrpc": "2.0", "id": 32, "method": "initialize",
+                       "params": ["a", 1, {"clientInfo": {"name": "x"}}]})
+        self.assertEqual(self.srv.recv()["error"]["code"], -32602)
+        self.srv.send({"jsonrpc": "2.0", "id": 33, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18", "clientInfo": "nope"}})
+        self.assertIn("serverInfo", self.srv.recv()["result"])
+        self.srv.send({"jsonrpc": "2.0", "id": 34, "method": "ping"})
+        self.assertEqual(self.srv.recv()["result"], {})
+
+    def test_invalid_utf8_bytes_then_ping(self):
+        self.srv.raw_bytes(b'\xff\xfe garbage \x80\n' +
+                           b'{"jsonrpc":"2.0","id":35,"method":"ping"}\n')
+        self.assertEqual(self.srv.recv()["error"]["code"], -32700)
+        r = self.srv.recv()
+        self.assertEqual(r["id"], 35)
+        self.assertEqual(r["result"], {})
+
+    def test_oversized_message_answered_and_server_keeps_serving(self):
+        big = ('{"jsonrpc":"2.0","id":36,"method":"ping","params":{"pad":"'
+               + "A" * (10 * 1024 * 1024 + 64) + '"}}')
+        self.srv.send(big)
+        r = self.srv.recv()
+        self.assertEqual(r["error"]["code"], -32600)
+        self.assertIn("too large", r["error"]["message"])
+        self.srv.send({"jsonrpc": "2.0", "id": 37, "method": "ping"})
+        self.assertEqual(self.srv.recv()["result"], {})
+
+    def test_readonly_annotations_advertised(self):
+        self.srv.send({"jsonrpc": "2.0", "id": 38, "method": "tools/list"})
+        tools = {t["name"]: t for t in self.srv.recv()["result"]["tools"]}
+        for reader in ("check_code", "get_experience", "search", "explain"):
+            self.assertTrue(tools[reader].get("annotations", {}).get("readOnlyHint"), reader)
+        self.assertNotIn("readOnlyHint",
+                         tools["record_failure"].get("annotations", {}))
+
+    def test_notification_with_junk_params_is_silently_dropped(self):
+        self.srv.send({"jsonrpc": "2.0", "method": "notifications/initialized",
+                       "params": "garbage"})
+        self.srv.send({"jsonrpc": "2.0", "id": 39, "method": "ping"})
+        self.assertEqual(self.srv.recv()["id"], 39)
+
+    def test_latest_protocol_version_echoed_and_unknown_downgrades(self):
+        self.srv.send({"jsonrpc": "2.0", "id": 41, "method": "initialize",
+                       "params": {"protocolVersion": "2025-11-25", "capabilities": {}}})
+        self.assertEqual(self.srv.recv()["result"]["protocolVersion"], "2025-11-25")
+        self.srv.send({"jsonrpc": "2.0", "id": 42, "method": "initialize",
+                       "params": {"protocolVersion": "2099-01-01", "capabilities": {}}})
+        self.assertEqual(self.srv.recv()["result"]["protocolVersion"], "2025-06-18")
 
 
 if __name__ == "__main__":

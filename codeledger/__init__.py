@@ -3,4 +3,4 @@
 States: probation -> proven | quarantined. Evidence over opinion.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
