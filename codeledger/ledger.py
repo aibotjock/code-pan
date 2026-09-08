@@ -34,6 +34,13 @@ def clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+def default_project() -> str:
+    """Per-repo scope key: <dirname>-<hash> of the current working directory."""
+    cwd = os.getcwd()
+    tag = hashlib.sha1(cwd.encode()).hexdigest()[:8]
+    return f"{os.path.basename(cwd) or 'root'}-{tag}"
+
+
 def truncate(text: str, limit: int, label: str = "output") -> str:
     if len(text) <= limit:
         return text

@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""codepan — terminal front-end to CodeLedger (install: symlink into ~/.local/bin)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from codeledger.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

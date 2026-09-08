@@ -5,14 +5,13 @@ dependencies. stdout carries only protocol messages; logs go to stderr.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
 import traceback
 
 from . import __version__, engine
-from .ledger import Store, now_iso
+from .ledger import Store, default_project, now_iso
 
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
@@ -259,9 +258,7 @@ _DISPATCH = {
 
 
 def _default_project() -> str:
-    cwd = os.getcwd()
-    tag = hashlib.sha1(cwd.encode()).hexdigest()[:8]
-    return f"{os.path.basename(cwd) or 'root'}-{tag}"
+    return default_project()
 
 
 def _send(obj: dict) -> None:

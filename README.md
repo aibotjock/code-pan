@@ -41,6 +41,30 @@ Env overrides: `CODELEDGER_DB`, `CODELEDGER_PROJECT` (defaults to
 `<cwd-basename>-<hash>` of the directory Claude Code launches it from, so each
 repo gets its own project scope automatically), `CODELEDGER_ACTOR`.
 
+## Terminal: `codepan`
+
+The same ledger from your shell (one-time install):
+
+```bash
+ln -sf /data/codeledger/codepan ~/.local/bin/codepan
+```
+
+```bash
+codepan check src/foo.py                 # ⛔ BLOCK on known failure → exit 1
+cat new_module.py | codepan check -      # pipe works too
+codepan ok src/foo.py --evidence test='pytest: 42 passed'
+codepan fail old.py --reason 'timeouts' --signature TimeoutError \
+    --evidence test=regression --replacement new.py
+codepan exp 'retry backoff'              # before coding: proven + known failures
+codepan search 'fetch' --state quarantined
+codepan explain 7 && codepan maintain --dry-run
+```
+
+Shares the database, project scoping, and audit trail with the MCP
+(`--db/--project/--actor` or the same env vars). Exit codes: `0` ok, `1` BLOCK
+(so `check` drops straight into hooks and CI), `2` usage/validation error.
+From inside Claude Code, `! codepan check …` runs it in-session.
+
 ## Three states
 
 | state | meaning | how you get there |
