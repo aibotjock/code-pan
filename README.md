@@ -5,7 +5,7 @@ have been **verified** to work, which have **failed** (and why), and what
 successfully replaced them. It learns from validated outcomes — never from the
 model's opinion about whether code looks correct.
 
-Repo: https://github.com/aibotjock/panningforcode
+Repo: https://github.com/aibotjock/code-pan
 
 ## The loop
 
@@ -30,7 +30,7 @@ Paste this into your project's `CLAUDE.md`:
 ## Install
 
 ```bash
-git clone https://github.com/aibotjock/panningforcode /data/codeledger
+git clone https://github.com/aibotjock/code-pan /data/codeledger
 claude mcp add codeledger --scope user -- python3 /data/codeledger/server.py
 ```
 
